@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Tool state (never commit user/project data)
+*.json
+graphic_sync_settings.json
+graphic_registry.json
+
+# Private / internal — NOT for the public repo
+HANDOFF.md
+backups/
+*.WORKING.*.py
+*.CHECKPOINT.*.py
+
+# OS
+.DS_Store
