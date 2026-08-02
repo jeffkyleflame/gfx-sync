@@ -17,11 +17,11 @@ Flame-generated Type graphic.
 
 ## TLDR
 
-Generate a Registry of graphics by analyzing all timelines within a specified scope.
+- Generate a Registry of graphics by analyzing all timelines within a specified scope.
 
-Adjust the text whenever you need, and  Sync those changes to every registered graphic at once without adjusting each segment's layout.
+- Adjust the text whenever you need, and  Sync those changes to every registered graphic at once without adjusting each segment's layout.
 
-Easily create Segment Connections across multiple Gap Type FX that share layout (position / scale / format), and then can sync them using built in Flame sync tools.
+- Easily create Segment Connections across multiple Gap Type FX that share layout (position / scale / format), and then can sync them using built in Flame sync tools.
 
 Text and layout are managed independently — change one without disturbing the
 other.
