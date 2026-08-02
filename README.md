@@ -65,8 +65,14 @@ Copy the single file into its own folder on Flame's shared Python path and
 restart Flame:
 
 ```
-/opt/Autodesk/shared/python/graphic_sync/graphic_sync.py
+/opt/Autodesk/shared/python/gfx_sync/gfx_sync.py
 ```
+
+> **Upgrading from an early copy named `graphic_sync.py`?** Delete the old file
+> and its folder first. Flame loads every `.py` under its shared python path, so
+> leaving both behind gives you duplicate "GFX Sync" menu entries and two copies
+> of the tool competing for the same registry. Your existing registry and
+> settings are found and migrated automatically — nothing is lost.
 
 
 

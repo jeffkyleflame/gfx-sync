@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Off-box tests for graphic_sync.py's pure helpers.
+"""Off-box tests for gfx_sync.py's pure helpers.
 
-graphic_sync.py imports `flame`, which only exists inside Flame, so this file
+gfx_sync.py imports `flame`, which only exists inside Flame, so this file
 ast-extracts the functions under test from the source and execs them into a
 plain namespace -- no Flame, no PySide6, no restart loop.
 
-Run:   python3 test_graphic_sync.py
+Run:   python3 test_gfx_sync.py
 
-This file lives in the dev folder, NOT in Flame's hook path. It finds
-graphic_sync.py beside itself or in the sibling deployed `gfx-sync/` folder.
+This file lives outside Flame's hook path. It finds gfx_sync.py beside itself,
+in the parent folder (the repo layout), or in a sibling `gfx-sync/` folder.
 """
 
 import ast
@@ -21,17 +21,17 @@ import tempfile
 
 
 def _find_src():
-    """Locate graphic_sync.py. Handles the repo layout (test in tests/, tool in
-    the parent), the test sitting beside the tool, and the author's dev folder
-    (kept OUTSIDE Flame's recursively-scanned python/ root)."""
+    """Locate gfx_sync.py. Handles the repo layout (test in tests/, tool in the
+    parent), the test sitting beside the tool, and the author's dev folder (kept
+    OUTSIDE Flame's recursively-scanned python/ root)."""
     here = os.path.dirname(os.path.abspath(__file__))
-    for cand in (os.path.join(here, "graphic_sync.py"),            # side by side
-                 os.path.join(here, "..", "graphic_sync.py"),      # repo: tests/
-                 os.path.join(here, "..", "gfx-sync", "graphic_sync.py"),
-                 os.path.join(here, "..", "python", "gfx-sync", "graphic_sync.py")):
+    for cand in (os.path.join(here, "gfx_sync.py"),            # side by side
+                 os.path.join(here, "..", "gfx_sync.py"),      # repo: tests/
+                 os.path.join(here, "..", "gfx-sync", "gfx_sync.py"),
+                 os.path.join(here, "..", "python", "gfx-sync", "gfx_sync.py")):
         if os.path.exists(cand):
             return os.path.abspath(cand)
-    raise SystemExit("graphic_sync.py not found beside the test, in the parent "
+    raise SystemExit("gfx_sync.py not found beside the test, in the parent "
                      "folder, in ../gfx-sync/, or in ../python/gfx-sync/")
 
 
@@ -66,7 +66,7 @@ WANTED = {
 
 def extract_namespace():
     tree = ast.parse(open(SRC).read())
-    quiet = logging.getLogger("test_graphic_sync")
+    quiet = logging.getLogger("test_gfx_sync")
     quiet.addHandler(logging.NullHandler())
     quiet.propagate = False
     ns = {"re": re, "ast": ast, "os": os, "json": json, "log": quiet}
@@ -231,7 +231,7 @@ def test_in_sync():
 
 def test_registry_safety():
     with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "reg", "graphic_registry.json")
+        path = os.path.join(td, "reg", "gfx_registry.json")
         G["registry_path"] = lambda: path
         G["_legacy_registry_candidates"] = lambda: []
 

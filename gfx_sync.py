@@ -1,5 +1,5 @@
 """
-Script Name: Graphic Sync
+Script Name: GFX Sync
 Script Version: 1.0.0
 Flame Version: 2026.1
 Written by: Jeff Kyle
@@ -20,7 +20,7 @@ Description:
     own framing -- but it works for any Flame-generated Type graphic.
 
     Install (single file, its own folder, unique name; restart Flame):
-        /opt/Autodesk/shared/python/graphic_sync/graphic_sync.py
+        /opt/Autodesk/shared/python/gfx_sync/gfx_sync.py
 
     Tabs:
         Segments   - scan the scope; see every matching Type segment, its text,
@@ -53,7 +53,7 @@ import flame
 from PySide6 import QtWidgets, QtCore, QtGui
 
 
-log = logging.getLogger("graphic_sync")
+log = logging.getLogger("gfx_sync")
 if not log.handlers:
     _h = logging.StreamHandler()
     _h.setFormatter(logging.Formatter("%(message)s"))
@@ -70,8 +70,12 @@ SCOPES = ["Selected", "Current Sequence", "Current Reel", "Current Reel Group",
           "All Sequences Reels"]
 MATCH_MODES = ["Gap segments with Type", "Any segment with Type"]
 
-SETTINGS_PATH = os.path.join(os.path.expanduser("~"), "flame", "graphic_sync_settings.json")
-LEGACY_SETTINGS_PATH = os.path.join(os.path.expanduser("~"), "flame", "legal_sync_settings.json")
+SETTINGS_PATH = os.path.join(os.path.expanduser("~"), "flame", "gfx_sync_settings.json")
+# Older names, read (never written) so existing installs migrate on the next save.
+LEGACY_SETTINGS_PATHS = [
+    os.path.join(os.path.expanduser("~"), "flame", "graphic_sync_settings.json"),
+    os.path.join(os.path.expanduser("~"), "flame", "legal_sync_settings.json"),
+]
 DEFAULT_SETTINGS = {
     "scope": "Current Reel",
     "registry_dir": "",          # blank -> per-project default
@@ -91,7 +95,7 @@ LAYER_SEP = "---"
 
 
 def load_settings():
-    for p in (SETTINGS_PATH, LEGACY_SETTINGS_PATH):
+    for p in [SETTINGS_PATH] + LEGACY_SETTINGS_PATHS:
         try:
             with open(p) as f:
                 return {**DEFAULT_SETTINGS, **json.load(f)}
@@ -123,23 +127,29 @@ def _default_registry_dir():
     try:
         sf = str(flame.projects.current_project.setups_folder).strip("'\"")
         if sf:
-            return os.path.join(sf, "graphic_sync")
+            return os.path.join(sf, "gfx_sync")
     except Exception:
         pass
-    return os.path.join(os.path.expanduser("~"), "flame", "graphic_sync")
+    return os.path.join(os.path.expanduser("~"), "flame", "gfx_sync")
 
 
 def registry_path():
     d = (load_settings().get("registry_dir") or "").strip() or _default_registry_dir()
-    return os.path.join(d, "graphic_registry.json")
+    return os.path.join(d, "gfx_registry.json")
 
 
 def _legacy_registry_candidates():
+    """Registry locations from earlier names of this tool, in newest-first order.
+    Read only -- never written, never deleted. load_registry() falls back through
+    these, and the next save writes to the CURRENT path, so an existing project
+    migrates itself while the old file stays on disk as a safety net."""
     d = (load_settings().get("registry_dir") or "").strip() or _default_registry_dir()
-    cands = [os.path.join(d, "legal_registry.json")]
+    cands = [os.path.join(d, "graphic_registry.json"),      # graphic_sync era
+             os.path.join(d, "legal_registry.json")]        # legal_sync era
     try:
         sf = str(flame.projects.current_project.setups_folder).strip("'\"")
         if sf:
+            cands.append(os.path.join(sf, "graphic_sync", "graphic_registry.json"))
             cands.append(os.path.join(sf, "legal_sync", "legal_registry.json"))
     except Exception:
         pass
