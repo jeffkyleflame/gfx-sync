@@ -2663,4 +2663,5 @@ def get_media_panel_custom_ui_actions():
 
 def get_main_menu_custom_ui_actions():
     return [{"name": "GFX Sync",
-             "actions": [{"name": "Open Manager\u2026", "execute": _open}]}]
+             "actions": [{"name": "Open Manager\u2026", "execute": _open,
+                          "minimumVersion": "2026.1.0"}]}]
