@@ -13,11 +13,25 @@ Flame-generated Type graphic.
 
 <img width="893" height="603" alt="gfx-sync-gui" src="https://github.com/user-attachments/assets/5fc36484-deb9-4185-a13a-e4f862dbf144" />
 
+---
+
+## TLDR
+
+- Generate a **Registry** of graphics by analyzing all timelines within a scope.
+- **Sync** pushes the  text out to every registered graphic at once without adjusting layout.
+- Separately, you **connect** matching graphics across aspects so they share
+  layout (position / scale / format), and then can sync them using built in Flame sync tools.
+
+Text and layout are managed independently — change one without disturbing the
+other.
+
+---
+
 
 ## How it works
 
 A per-project JSON **registry** is the single source of truth for each graphic's
-text. Segments are tagged `graphicNN` and receive their text from the registry —
+text. Segments are assigned `graphicNN` and receive their text from the registry —
 one-directional (registry → Type layers), so you edit text in one place
 and push it everywhere. Layout (position / scale / format) is handled separately
 through Flame's native **segment connections**, so text and layout stay
@@ -53,6 +67,7 @@ restart Flame:
 ```
 /opt/Autodesk/shared/python/graphic_sync/graphic_sync.py
 ```
+
 
 
 ## Usage
