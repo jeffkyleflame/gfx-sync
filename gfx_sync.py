@@ -1,10 +1,10 @@
 """
 Script Name: GFX Sync
-Script Version: 1.0.0
+Script Version: 1.0.1
 Flame Version: 2026.1
 Written by: Jeff Kyle
 Creation Date: 06.10.26
-Update Date: 06.23.26
+Update Date: 09.24.26
 Description:
 
     Sync the text of Flame Type (Timeline FX) graphics across many sequences
@@ -60,6 +60,12 @@ if not log.handlers:
     log.addHandler(_h)
     log.setLevel(logging.INFO)
     log.propagate = False
+
+
+# Shown in the window header and reported by users. MUST stay identical to the
+# "Script Version:" field in the module docstring above -- that field is what
+# Logik Portal reads and displays. Bump both together.
+VERSION = "1.0.1"
 
 
 # ====================================================================
@@ -697,31 +703,64 @@ def graphic_inventory(scope, warnings=None, seqs=None):
 
 
 def _seg_uid(seg):
-    """Cross-call identity. Flame exposes seg.uid (confirmed), which is exact;
-    fall back to sequence + name + position only if uid is missing."""
+    """Cross-call identity. seg.uid reads None on box (Flame 2027.1, checked
+    2026-09-23), so in practice the fallback runs: sequence + name + position,
+    plus the names of the two containers above the sequence (reel, reel group).
+    The containers matter: a drag-copied sequence keeps its name, so without
+    them a still-connected copy in a Backup / reference reel would pass for the
+    live segment. The uid branch stays for any Flame that fills it in. Two
+    scanned segments that still share a key are reported by identity_collisions
+    and never connected."""
     u = getattr(seg, "uid", None)
     if u:
         return ("uid", str(u))
-    parts = [_clean_name(_ancestor(seg, "PySequence")), _clean_name(seg)]
+    seq = _ancestor(seg, "PySequence")
+    parts = [_clean_name(seq), _clean_name(seg)]
     for attr in ("record_in", "start", "start_frame", "source_in"):
         v = getattr(seg, attr, None)
         if v is not None:
             parts.append(str(v))
             break
+    try:                                     # Flame props can raise beyond
+        box = getattr(seq, "parent", None)   # AttributeError: never let that
+        for _depth in range(2):              # sink a scan -- reel, reel group
+            if box is None:
+                break
+            parts.append(_clean_name(box))
+            box = getattr(box, "parent", None)
+    except Exception:
+        pass
     return tuple(parts)
 
 
+def identity_collisions(keys):
+    """{key: count} for identity keys shared by 2+ scanned segments. With
+    seg.uid empty, two graphics in one sequence with the same name (often both
+    blank) and the same In -- e.g. a super and a legal starting on one frame on
+    different tracks -- get the same key, and the connection grouping, the
+    queue and the Set as Source marks would treat them as ONE segment."""
+    seen = {}
+    for k in keys:
+        seen[k] = seen.get(k, 0) + 1
+    return {k: n for k, n in seen.items() if n > 1}
+
+
 def _safe_delete(obj):
-    """Try the known ways to remove a media-panel clip. Returns (ok, error)."""
-    try:
-        flame.delete(obj)
-        return True, None
-    except Exception as e1:
+    """Remove a temporary media-panel clip. Returns (ok, error).
+    flame.delete defaults to confirm=True, which a script can't answer: in the
+    sibling tool CCM (same Flame) that made the delete a silent no-op and temp
+    copies piled up in the reel. So pass confirm=False first; the older forms
+    stay as fallbacks for a Flame that rejects the keyword."""
+    why = []
+    for label, fn in (("flame.delete(confirm=False)", lambda: flame.delete(obj, confirm=False)),
+                      ("flame.delete", lambda: flame.delete(obj)),
+                      ("clip.delete", lambda: obj.delete())):
         try:
-            obj.delete()
+            fn()
             return True, None
-        except Exception as e2:
-            return False, e2 or e1
+        except Exception as e:
+            why.append("%s: %s" % (label, e))
+    return False, "; ".join(why)
 
 
 def _segment_location(seg):
@@ -899,13 +938,17 @@ def _connect_one(master_seg, dst_seg):
         _trim_clip_tail(clip, target_f)        # pre-trim guard (best-effort)
         dst_seq.overwrite(clip, dst_in, dst_track)
     except Exception as e:
-        if clip is not None:
-            _safe_delete(clip)
+        if clip is not None and not _safe_delete(clip)[0]:
+            return False, "%s (and the temp copy is still in the reel -- delete it by hand)" % e
         return False, str(e)
-    _safe_delete(clip)
+    # the temp copy sits in the reel the scopes scan; say so if it survives
+    del_ok, del_err = _safe_delete(clip)
+    leftover = None if del_ok else (
+        "temp copy left in the reel -- delete it by hand (%s)" % del_err)
     placed = _segment_at(dst_track, dst_in)
     if placed is None:
-        return False, "placed segment not found at %s" % dst_in
+        return False, "; ".join(x for x in (
+            "placed segment not found at %s" % dst_in, leftover) if x)
     cur_f = _frames(placed.record_duration)
     if target_f is not None and cur_f is not None:
         delta = cur_f - target_f          # +shrink / -extend (verified)
@@ -913,8 +956,9 @@ def _connect_one(master_seg, dst_seg):
             try:
                 placed.trim_tail(delta, False)   # ripple=False
             except Exception as e:
-                return True, "placed but trim failed: %s" % e
-    return True, None
+                return True, "; ".join(x for x in (
+                    "placed but trim failed: %s" % e, leftover) if x)
+    return True, leftover
 
 
 def resolve_group_source(uids, marked):
@@ -971,9 +1015,12 @@ def _grp_label(k):
     return s
 
 
-def connection_groups(inv):
+def connection_groups(inv, outside=None):
     """Union-find over connected_segments() -> list of groups (each a list of
-    inv indices). Multi-member groups (real connections) come first."""
+    inv indices). Multi-member groups (real connections) come first. Pass a
+    dict as `outside` to also count, per scanned segment, connected peers that
+    are NOT in the scan (another reel, outside the scope) -- a segment whose
+    only partners are elsewhere is still part of a connected set."""
     n = len(inv)
     uids = [_seg_uid(d["seg"]) for d in inv]
     idx = {}
@@ -1001,49 +1048,218 @@ def connection_groups(inv):
             j = idx.get(_seg_uid(c))
             if j is not None:
                 union(i, j)
+            elif outside is not None:
+                outside[i] = outside.get(i, 0) + 1
     groups = {}
     for i in range(n):
         groups.setdefault(find(i), []).append(i)
     return sorted(groups.values(), key=lambda g: (len(g) == 1, -len(g)))
 
 
-def auto_connection_groups(inv):
-    """Propose connection groups automatically from the (aspect, GFX#) of each
-    segment -- the same key a human applies by hand: line up like aspects for
-    like graphics. Pure (no Flame calls of its own; reads what graphic_inventory
-    already gathered + connection_groups for existing wiring).
-
-    A bucket becomes a proposed group only if it has 2+ members AND they are not
-    already all in one existing connection cluster (so re-running is idempotent
-    and never re-copies a group that's already wired). Segments with no GFX
-    number can't be auto-grouped and are counted as skipped.
-
-    Returns (groups, already_connected, unassigned):
-      groups            list of lists of inv indices, ordered by aspect then GFX
-      already_connected count of (aspect,GFX#) buckets skipped as already wired
-      unassigned        count of segments skipped for having no GFX number
-    """
-    existing = connection_groups(inv)
-    cluster_of = {}
-    for cid, g in enumerate(existing):
+def link_facts(groups, outside, keys):
+    """Pure: connection_groups' result -> (cluster_of, cluster_size, tainted).
+      cluster_of    {inv index: set id}
+      cluster_size  scanned members + partners outside the scan, so a set that
+                    lives partly in another reel still counts as connected
+      tainted       every scanned segment in a set that holds a segment whose
+                    identity key collides with another's. seg.uid is None, so
+                    the key is sequence + name + In, and the grouping around a
+                    collision can't be trusted -- nothing there is connected."""
+    cluster_of, size = {}, {}
+    for cid, g in enumerate(groups):
+        size[cid] = len(g) + sum(outside.get(i, 0) for i in g)
         for i in g:
             cluster_of[i] = cid
+    clash = identity_collisions(keys)
+    bad = {cluster_of.get(i) for i, k in enumerate(keys) if k in clash}
+    tainted = {i for i, c in cluster_of.items() if c in bad}
+    return cluster_of, size, tainted
+
+
+def link_context(inv):
+    """One connection read for a scan -> (groups, cluster_of, cluster_size,
+    tainted, keys). Every connection decision (Auto Connection, the Q rows,
+    Execute Queue, Multi Segment Connection) plans from this."""
+    outside = {}
+    groups = connection_groups(inv, outside) if inv else []
+    keys = [_seg_uid(d["seg"]) for d in inv]
+    cluster_of, size, tainted = link_facts(groups, outside, keys)
+    return groups, cluster_of, size, tainted, keys
+
+
+def plan_connection_group(idxs, cluster_of, cluster_size, marked=(), tainted=()):
+    """Pure plan for one connection group (inv indices), against the connected
+    sets as they stand. A set is WIRED when it has 2+ members (partners outside
+    the scan count), LOOSE otherwise. The Q rows, Execute Queue and Multi
+    Segment Connection's confirm box all read this plan, so what is previewed is
+    what runs. Returns a dict:
+      work      False when fewer than 2 members resolve or all are already in
+                one set -- nothing to do
+      anchor    the one wired set the group JOINS; None when every member is
+                loose, or when members come from 2+ wired sets (a merge)
+      targets   the members the group replaces: those outside the anchor set,
+                so the set itself is never re-copied. With no anchor, the whole
+                group (its master is picked later: Set as Source, else auto)
+      master    joining: a Set as Source mark anywhere in the anchor set, else
+                the group's first set member. Re-lay-out: the marked segment.
+      relayout  a mark on a joining segment while the group holds the WHOLE set
+                (and none of the set is outside the scan): that segment's layout
+                replaces the set's. With only part of the set in the group this
+                would split it, so it's refused.
+      set       the anchor set's scanned members (the layout source a join
+                READS), so the queue can refuse a later group that replaces them
+      error     refused -- identity collision, 2+ marks, or a mark that would
+                split the set. targets stay filled so the Q rows can show it.
+    """
+    idxs = list(dict.fromkeys(idxs))                  # de-dupe, keep order
+    out = {"work": False, "anchor": None, "targets": [], "master": None,
+           "relayout": False, "error": None, "set": []}
+    cid = {i: cluster_of.get(i, ("solo", i)) for i in idxs}
+    if len(idxs) < 2 or len(set(cid.values())) < 2:
+        return out
+    out["work"] = True
+    wired = []
+    for i in idxs:
+        if cluster_size.get(cid[i], 1) > 1 and cid[i] not in wired:
+            wired.append(cid[i])
+    anchor = wired[0] if len(wired) == 1 else None
+    members = [i for i, c in cluster_of.items() if c == anchor] if anchor is not None else []
+    out["anchor"] = anchor
+    out["set"] = members
+    out["targets"] = [i for i in idxs if cid[i] != anchor] if anchor is not None else idxs
+    if any(i in tainted for i in idxs) or any(i in tainted for i in members):
+        out["error"] = ("two graphics here share a sequence, name and In, so they can't be "
+                        "told apart — give one of each pair a segment name in Flame, then rescan.")
+        return out
+    if anchor is None:
+        n_mk = len([i for i in idxs if i in marked])
+        if n_mk > 1:                  # _group_master would refuse it at run time
+            out["error"] = ("%d segments in this group are marked as source \u2014 "
+                            "mark only one." % n_mk)
+        return out
+    mk_in = [i for i in members if i in marked]
+    mk_out = [i for i in out["targets"] if i in marked]
+    if len(mk_in) + len(mk_out) > 1:
+        out["error"] = ("%d segments in this group or its connected set are marked as source "
+                        "— mark only one." % (len(mk_in) + len(mk_out)))
+    elif mk_out:
+        whole = set(members) <= set(idxs)
+        inside = cluster_size.get(anchor, 0) <= len(members)
+        if whole and inside:
+            out["relayout"] = True
+            out["master"] = mk_out[0]
+            out["targets"] = [i for i in idxs if i != mk_out[0]]
+        elif whole:
+            out["error"] = ("%d segment(s) connected to this set are outside the current "
+                            "Scope, so re-laying it out here would split them off \u2014 widen "
+                            "the Scope to include them first."
+                            % (cluster_size.get(anchor, 0) - len(members)))
+        else:
+            out["error"] = ("the marked source is a segment that isn't in the connected set yet "
+                            "— copying it over only part of the set would split it. Unmark it "
+                            "to use the set's layout, or select the WHOLE set plus it for Multi "
+                            "Segment Connection to re-lay-out everything.")
+    else:
+        out["master"] = mk_in[0] if mk_in else next(i for i in idxs if cid[i] == anchor)
+    return out
+
+
+def resolve_queue(queue, key_to_idx, cluster_of, cluster_size, marked=(), tainted=()):
+    """Pure: plan every queued group (identity-key lists) in order -- the same
+    call feeds the Q rows and Execute Queue. One entry per group:
+      {"idxs", "plan", "missing", "overlap"}
+    missing  members no longer in the scan (scope changed). Such a group is
+             dropped, never re-planned into something the user didn't review.
+    overlap  queue position of an EARLIER runnable group this one conflicts
+             with: it uses a segment that group replaces (the handle would be
+             stale), or it replaces a segment that group copied its layout from
+             (a join into a set that a later re-lay-out replaces would be left
+             behind in the old set). A conflicting group doesn't run."""
+    out, wrote, read = [], {}, {}
+    for gi, g in enumerate(queue):
+        idxs, missing = [], 0
+        for u in g:
+            i = key_to_idx.get(u)
+            if i is None:
+                missing += 1
+            elif i not in idxs:
+                idxs.append(i)
+        plan = plan_connection_group(idxs, cluster_of, cluster_size, marked, tainted)
+        writes = set(plan["targets"])
+        reads = set() if plan["relayout"] else set(plan["set"])
+        if plan["master"] is not None:
+            reads.add(plan["master"])
+        hits = [wrote[i] for i in writes | reads if i in wrote]
+        hits += [read[i] for i in writes if i in read]
+        overlap = min(hits) if hits else None
+        if not missing and plan["work"] and not plan["error"] and overlap is None:
+            for i in writes:
+                wrote.setdefault(i, gi)
+            for i in reads:
+                read.setdefault(i, gi)
+        out.append({"idxs": idxs, "plan": plan, "missing": missing, "overlap": overlap})
+    return out
+
+
+def auto_connection_groups(inv, ctx=None):
+    """Propose connection groups automatically from the (aspect, GFX#) of each
+    segment -- the same key a human applies by hand: line up like aspects for
+    like graphics. Reads connections once via link_context (partners outside the
+    scan count) unless the caller passes that context in; no timeline change.
+
+    Per (aspect, GFX#) bucket with 2+ members:
+      - touches an identity collision    -> left alone, reported as unsafe
+      - all in one connected set         -> already connected, skipped
+      - no member connected yet          -> one group of all of them
+      - ONE connected set + loose ones   -> the loose ones JOIN that set: one
+                                            group = an anchor from the set + the
+                                            loose members (the set itself is not
+                                            re-copied)
+      - 2+ separate connected sets       -> left alone and reported as split:
+                                            which layout wins is the user's call
+    Re-running is idempotent. Segments with no GFX number are counted, skipped.
+
+    Returns (groups, already_connected, unassigned, split, unsafe):
+      groups            [{"idxs": [...], "anchor": idx or None}], by aspect then
+                        GFX; with an anchor, idxs[0] is it
+      already_connected count of buckets skipped as already wired
+      unassigned        count of segments skipped for having no GFX number
+      split             [(aspect, num, n_sets, n_loose)] buckets left alone
+      unsafe            [(aspect, num)] buckets left alone (identity collision)
+    """
+    _g, cluster_of, size, tainted, _k = ctx if ctx is not None else link_context(inv)
     buckets, unassigned = {}, 0
     for i, d in enumerate(inv):
         if d.get("num") is None:
             unassigned += 1
             continue
         buckets.setdefault((d["aspect"], d["num"]), []).append(i)
-    groups, already_connected = [], 0
+    groups, already_connected, split, unsafe = [], 0, [], []
     for key in sorted(buckets):
         idxs = buckets[key]
         if len(idxs) < 2:
             continue                      # only one occurrence -> nothing to join
-        if len({cluster_of.get(i) for i in idxs}) == 1:
-            already_connected += 1        # all share one cluster -> already wired
+        if any(i in tainted for i in idxs):
+            unsafe.append(key)
             continue
-        groups.append(idxs)
-    return groups, already_connected, unassigned
+        wired, loose = [], []
+        for i in idxs:
+            c = cluster_of.get(i)
+            if size.get(c, 1) > 1:
+                if c not in wired:
+                    wired.append(c)
+            else:
+                loose.append(i)
+        if len(wired) > 1:
+            split.append((key[0], key[1], len(wired), len(loose)))
+        elif not wired:
+            groups.append({"idxs": idxs, "anchor": None})
+        elif not loose:
+            already_connected += 1        # all share one set -> already wired
+        else:
+            anchor = next(i for i in idxs if cluster_of.get(i) == wired[0])
+            groups.append({"idxs": [anchor] + loose, "anchor": anchor})
+    return groups, already_connected, unassigned, split, unsafe
 
 
 # ====================================================================
@@ -1127,6 +1343,7 @@ QDialog, QWidget { background-color: #1e1e1e; color: #cccccc;
     font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 13px; }
 QLabel { color: #cccccc; }
 QLabel#header { color: #ffffff; font-size: 18px; font-weight: bold; letter-spacing: 2px; }
+QLabel#version { color: #777777; font-size: 11px; font-weight: normal; padding-bottom: 2px; }
 QTabWidget::pane { border: 1px solid #333333; border-radius: 6px; top: -1px; }
 QTabBar::tab { background: #232323; color: #aaaaaa; padding: 7px 16px;
     border: 1px solid #333333; border-bottom: none;
@@ -1202,9 +1419,18 @@ class GraphicSyncDialog(QtWidgets.QDialog):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
 
+        hrow = QtWidgets.QHBoxLayout()
+        hrow.setSpacing(8)
         hdr = QtWidgets.QLabel("GFX SYNC")
         hdr.setObjectName("header")
-        root.addWidget(hdr)
+        hrow.addWidget(hdr)
+        # subtle version badge, sitting on the wordmark's baseline
+        ver = QtWidgets.QLabel("v" + VERSION)
+        ver.setObjectName("version")
+        ver.setToolTip("GFX Sync version %s" % VERSION)
+        hrow.addWidget(ver, 0, QtCore.Qt.AlignBottom)
+        hrow.addStretch(1)
+        root.addLayout(hrow)
 
         srow = QtWidgets.QHBoxLayout()
         srow.addWidget(QtWidgets.QLabel("Scope:"))
@@ -1703,6 +1929,14 @@ class GraphicSyncDialog(QtWidgets.QDialog):
             seqs, self._inv = [], []
         for wmsg in warns:
             self._say(wmsg)
+        # Flame gives segments no id (seg.uid is None), so identity is sequence +
+        # name + In. Say so when two scanned graphics share all three.
+        clash = identity_collisions([_seg_uid(d["seg"]) for d in self._inv])
+        if clash:
+            where = sorted({str(k[0]) for k in clash if isinstance(k, tuple) and k[0] != "uid"})
+            self._say("⚠ %d graphic(s) share a sequence, name and In with another, so the "
+                      "Connections tab can't tell them apart. Give one of each pair a segment "
+                      "name in Flame. In: %s" % (sum(clash.values()), ", ".join(where) or "?"))
         if not seqs:
             # scope resolved to nothing -- say WHY instead of a silent empty table
             if scope == "Selected":
@@ -1977,8 +2211,10 @@ class GraphicSyncDialog(QtWidgets.QDialog):
             "Rows packed together with no gap are connected to each other; a blank "
             "row separates one group from the next. Unconnected segments sit alone. "
             "Break removes a connection. Auto Connection queues a group for every "
-            "like-aspect, like-GFX set across the scope automatically (already-"
-            "connected groups skipped) \u2014 review the Q rows, then Execute Queue. "
+            "like-aspect, like-GFX set across the scope automatically: new segments "
+            "join an existing connected set (Q1 \u2192 A: only the Q rows change), a GFX "
+            "split across 2+ connected sets is reported, never queued, and a group "
+            "that won't run is marked \u26a0 (hover for why). "
             "Multi Segment Connection does the same for a hand-picked set: select the "
             "same-aspect rows (the same graphic) and connect them \u2014 each keeps its "
             "own position and duration. In the confirm box: Yes runs now and closes, "
@@ -2010,8 +2246,10 @@ class GraphicSyncDialog(QtWidgets.QDialog):
         self.b_conn_auto = QtWidgets.QPushButton("Auto Connection")
         self.b_conn_auto.setToolTip(
             "Queue a connection group for every set of like-aspect, like-GFX "
-            "segments across the scope automatically. Already-connected groups "
-            "are skipped. Review the queued rows, then Execute Queue.")
+            "segments across the scope automatically. New segments join an "
+            "existing connected set; already-connected sets are skipped, and a GFX "
+            "split across 2+ sets is reported, not queued. Review the Q rows, then "
+            "Execute Queue.")
         self.b_conn_auto.clicked.connect(self._auto_connection)
         a.addWidget(self.b_conn_auto)
         self.b_conn_copy = QtWidgets.QPushButton("Multi Segment Connection")
@@ -2046,9 +2284,11 @@ class GraphicSyncDialog(QtWidgets.QDialog):
 
     def _render_connections(self, *_):
         inv = self._inv
-        groups = connection_groups(inv) if inv else []
-        clusters = [g for g in groups if len(g) > 1]
-        singles_idx = [g[0] for g in groups if len(g) == 1]
+        groups, cluster_of, size_of, tainted, keys = link_context(inv)
+        # a set counts as connected even when its other members are outside
+        # the scan (another reel) -- it gets a letter like any other set
+        clusters = [g for cid, g in enumerate(groups) if size_of.get(cid, 1) > 1]
+        singles_idx = [g[0] for cid, g in enumerate(groups) if size_of.get(cid, 1) <= 1]
         label_of = {}
         for k, g in enumerate(clusters):
             lab = _grp_label(k)
@@ -2056,40 +2296,72 @@ class GraphicSyncDialog(QtWidgets.QDialog):
                 label_of[ii] = lab
         cluster_member = set(label_of.keys())
 
-        # resolve the queue (uid-lists) against the current scan, dropping any
-        # member already in a real cluster and any group that no longer has 2+.
-        uid_to_idx = {}
-        for i, d in enumerate(inv):
-            uid_to_idx.setdefault(_seg_uid(d["seg"]), i)
-        queue_groups, qlabel_of, queued, kept = [], {}, set(), []
-        for g in (self._queue or []):
-            idxs = [uid_to_idx[u] for u in g if u in uid_to_idx and uid_to_idx[u] not in cluster_member]
-            if len(idxs) >= 2:
-                qi = len(queue_groups)
-                queue_groups.append(idxs)
-                for i in idxs:
-                    qlabel_of[i] = "Q%d" % (qi + 1)
-                    queued.add(i)
-                kept.append(g)
+        # Resolve the queue with the SAME call Execute Queue makes, so each Q
+        # row is a segment that group will connect. A group joining an existing
+        # set names it ("Q1 -> A") and only its Q rows are replaced; a star =
+        # re-lay-out from a marked source; a warning sign = it won't run (hover
+        # for why). Groups whose segments left the scan are dropped, never
+        # re-planned into something that wasn't reviewed.
+        key_to_idx = {}
+        for i, k in enumerate(keys):
+            key_to_idx.setdefault(k, i)
+        marked = {i for i, k in enumerate(keys) if k in self._sources}
+        res = resolve_queue(self._queue or [], key_to_idx, cluster_of, size_of, marked, tainted)
+        qblocks, qlabel_of, queued, kept, qnum, gone, blocked = [], {}, set(), [], {}, 0, 0
+        for gi, (g, r) in enumerate(zip(self._queue or [], res)):
+            plan = r["plan"]
+            if r["missing"]:
+                gone += 1
+                continue
+            if not plan["work"]:
+                continue                  # already all connected
+            qnum[gi] = len(kept) + 1
+            lab = "Q%d" % qnum[gi]
+            if plan["anchor"] is not None:
+                lab += " → " + (label_of.get(groups[plan["anchor"]][0]) or "outside scope")
+            if plan["relayout"]:
+                lab += " ★"
+            why = plan["error"]
+            if not why and r["overlap"] is not None:
+                why = ("shares a segment with Q%d, which runs first — run the queue, then "
+                       "Auto Connection again." % qnum.get(r["overlap"], r["overlap"] + 1))
+            if why:
+                lab += " ⚠"
+                blocked += 1
+            members = plan["targets"] or r["idxs"]
+            qblocks.append((lab, members, why))
+            for i in members:
+                if i not in qlabel_of or (qlabel_of[i][1] and not why):
+                    qlabel_of[i] = (lab, why)   # the group that will run wins
+                queued.add(i)
+            kept.append(g)
         if len(kept) != len(self._queue):
             self._queue = kept
+        if gone:
+            self._say("Dropped %d queued group(s): some of their segments are no longer in the "
+                      "scan (scope changed?). Run Auto Connection again." % gone)
 
         self.conn_label.setText(
-            "%d connected cluster(s), %d unconnected, %d queued group(s) in '%s'"
-            % (len(clusters), len(singles_idx), len(queue_groups), self.scope.currentText()))
+            "%d connected cluster(s), %d unconnected, %d queued group(s)%s in '%s'"
+            % (len(clusters), len(singles_idx), len(kept),
+               (" (%d won't run — hover the ⚠)" % blocked) if blocked else "",
+               self.scope.currentText()))
 
         mode = self.conn_sort.currentText() if hasattr(self, "conn_sort") else "Connection groups"
         rows = []
         if mode == "Connection groups":
-            blocks = [("cluster", g) for g in clusters]
-            blocks += [("queue", g) for g in queue_groups]
+            # a queued re-lay-out or merge lists set members in its Q block, so
+            # they're left out of their set's block rather than shown twice
+            blocks = [(None, [i for i in g if i not in queued]) for g in clusters]
+            blocks = [b for b in blocks if b[1]]
+            blocks += [((lab, why), m) for lab, m, why in qblocks]
             placed = cluster_member | queued
-            blocks += [("single", [i]) for i in range(len(inv)) if i not in placed]
-            for bi, (_btype, g) in enumerate(blocks):
+            blocks += [(None, [i]) for i in range(len(inv)) if i not in placed]
+            for bi, (q, g) in enumerate(blocks):
                 for ii in g:
-                    rows.append(("seg", ii))
+                    rows.append(("seg", ii, q))
                 if bi != len(blocks) - 1:
-                    rows.append(("spacer", None))
+                    rows.append(("spacer", None, None))
         else:
             def key(ii):
                 d = inv[ii]
@@ -2099,14 +2371,14 @@ class GraphicSyncDialog(QtWidgets.QDialog):
                     return (d["aspect"], d["seq"])
                 return (d["seq"],)
             for ii in sorted(range(len(inv)), key=key):
-                rows.append(("seg", ii))
+                rows.append(("seg", ii, qlabel_of.get(ii)))
 
         amber = QtGui.QColor("#d9a441")
         cyan = QtGui.QColor("#00b4d8")
         gold = QtGui.QColor("#ffcc33")
         self.conn_table.blockSignals(True)
         self.conn_table.setRowCount(len(rows))
-        for r, (kind, ii) in enumerate(rows):
+        for r, (kind, ii, q) in enumerate(rows):
             if kind == "spacer":
                 for c in range(7):
                     cell = QtWidgets.QTableWidgetItem("")
@@ -2116,10 +2388,10 @@ class GraphicSyncDialog(QtWidgets.QDialog):
                 self.conn_table.setRowHeight(r, 7)
                 continue
             d = inv[ii]
-            gid = ("GFX" + d["num"]) if d["num"] else "\u2014"
-            is_q = ii in queued
-            grp = qlabel_of.get(ii, "") if is_q else label_of.get(ii, "")
-            is_src = _seg_uid(d["seg"]) in self._sources
+            gid = ("GFX" + d["num"]) if d["num"] else "—"
+            is_q = q is not None
+            grp = q[0] if is_q else label_of.get(ii, "")
+            is_src = keys[ii] in self._sources
             tl = str(d["text"]).splitlines()
             txt = tl[0] if tl else ""
             seq_label = ("★ " + str(d["seq"])) if is_src else d["seq"]
@@ -2129,6 +2401,8 @@ class GraphicSyncDialog(QtWidgets.QDialog):
                 cell = QtWidgets.QTableWidgetItem(str(val))
                 if c == 0:
                     cell.setData(QtCore.Qt.UserRole, ii)
+                if is_q and q[1]:
+                    cell.setToolTip("Won't run: " + q[1])
                 if is_src and c == 0:
                     f = cell.font(); f.setBold(True); cell.setFont(f)
                     cell.setForeground(gold)
@@ -2213,6 +2487,11 @@ class GraphicSyncDialog(QtWidgets.QDialog):
             except Exception as e:
                 self._say("Break failed (%s): %s" % (d["seq"], e))
         self._say("remove_connection() on %d segment(s). Re-scanning to confirm grouping." % n)
+        if n and self._queue:
+            # queued groups were planned against the sets that just changed
+            self._say("Queue cleared (%d group(s)) \u2014 the connections it was built on "
+                      "changed. Run Auto Connection again." % len(self._queue))
+            self._queue = []
         self._scan_connections()
 
     def _pick_targets(self, candidates):
@@ -2333,23 +2612,87 @@ class GraphicSyncDialog(QtWidgets.QDialog):
             return
         if note:
             self._say(note)
-        chosen, serr = self._group_master(segs)        # honor a marked source
-        if serr:
-            self._say(serr)
+        # one row per segment: a segment shown in two Q blocks can be selected
+        # twice, and connecting it twice would reuse a handle made stale by the
+        # first overwrite
+        seen, uniq = set(), []
+        for sg in segs:
+            k = _seg_uid(sg)
+            if k not in seen:
+                seen.add(k)
+                uniq.append(sg)
+        segs = uniq
+        if len(segs) < 2:
+            self._say("Select at least two different segments to connect.")
             return
-        master = chosen or next((s for s in segs if _conn_count(s) > 0), segs[0])
-        how = "marked source" if chosen else "auto-picked"
-        text = ("Connect %d same-aspect segment(s) as one group?\n\n"
-                "Master (%s): '%s' in %s. The other %d will be replaced with a "
-                "connected copy, each keeping its own position and duration. "
-                "Undoable in Flame."
-                % (len(segs), how, _clean_name(master),
-                   _clean_name(_ancestor(master, "PySequence")), len(segs) - 1))
+        # Plan with the same call Execute Queue uses, so Yes (run now) and Queue
+        # (run later) do the same thing and the confirm box describes both.
+        inv = self._inv or []
+        _g, cluster_of, size_of, tainted, keys = link_context(inv)
+        key_to_idx = {}
+        for i, k in enumerate(keys):
+            key_to_idx.setdefault(k, i)
+        marked = {i for i, k in enumerate(keys) if k in self._sources}
+        idxs = [key_to_idx.get(_seg_uid(s)) for s in segs]
+        plan = None
+        if all(i is not None for i in idxs):
+            plan = plan_connection_group(idxs, cluster_of, size_of, marked, tainted)
+            if plan["error"]:
+                self._say("Multi Segment Connection: " + plan["error"])
+                return
+            if not plan["work"]:
+                self._say("Those %d segments are already connected to each other — nothing "
+                          "to do. (To push one segment's layout to the rest of its set, select "
+                          "it and use Sync Connected Segments.)" % len(segs))
+                return
+        if plan is not None and plan["master"] is not None:
+            master = inv[plan["master"]]["seg"]
+            chosen = master
+            run = [master] + [inv[i]["seg"] for i in plan["targets"]]
+            where = _clean_name(_ancestor(master, "PySequence"))
+            if plan["relayout"]:
+                text = ("Re-lay-out a connected set from the marked source?\n\n"
+                        "'%s' in %s (★ source) is copied over the other %d segment(s), "
+                        "replacing the set's layout. Each keeps its own position and "
+                        "duration. Undoable in Flame."
+                        % (_clean_name(master), where, len(plan["targets"])))
+            else:
+                how = "marked source" if plan["master"] in marked else "already in the set"
+                text = ("Join %d segment(s) to an existing connected set?\n\n"
+                        "Layout comes from '%s' in %s (%s). Only the %d joining segment(s) "
+                        "are replaced, each keeping its own position and duration; the set "
+                        "itself is left as is. Undoable in Flame."
+                        % (len(plan["targets"]), _clean_name(master), where, how,
+                           len(plan["targets"])))
+        else:
+            chosen, serr = self._group_master(segs)        # honor a marked source
+            if serr:
+                self._say(serr)
+                return
+            run = segs
+            master = chosen or next((s for s in segs if _conn_count(s) > 0), segs[0])
+            how = "marked source" if chosen else "auto-picked"
+            text = ("Connect %d same-aspect segment(s) as one group?\n\n"
+                    "Master (%s): '%s' in %s. The other %d will be replaced with a "
+                    "connected copy, each keeping its own position and duration. "
+                    "Undoable in Flame."
+                    % (len(segs), how, _clean_name(master),
+                       _clean_name(_ancestor(master, "PySequence")), len(segs) - 1))
         choice = self._confirm_three(text)
         if choice == "no":
             return
         if choice == "queue":
-            self._queue.append([_seg_uid(s) for s in segs])
+            if plan is None:
+                self._say("Can't queue this group: part of it isn't in the scan (check the "
+                          "Settings filters). Use Yes to run it now instead.")
+                return
+            stored = [_seg_uid(s) for s in segs]
+            if plan["master"] is not None and keys[plan["master"]] not in stored:
+                # the confirm box named a Set as Source master outside the
+                # selection: keep it in the group, so if it leaves the scan the
+                # group is dropped instead of quietly re-planned with another
+                stored.append(keys[plan["master"]])
+            self._queue.append(stored)
             self._say("Queued group %d (%d segments). Press Execute Queue when ready."
                       % (len(self._queue), len(segs)))
             self._render_connections()
@@ -2359,11 +2702,11 @@ class GraphicSyncDialog(QtWidgets.QDialog):
         # collect affected sequences BEFORE connecting -- overwrite makes the
         # destination seg handles stale, so _ancestor would fail for them after.
         affected = {}
-        for s in segs:
+        for s in run:
             sq = _ancestor(s, "PySequence")
             if sq is not None:
                 affected.setdefault(id(sq), sq)
-        done, master, errors = connect_segment_group(segs, master=chosen)
+        done, master, errors = connect_segment_group(run, master=chosen)
         self._reset_playheads_and_focus(affected.values(), original_seq)
         msgs = ["Connect issue (%s): %s" % (nm, e) for nm, e in errors]
         msgs.append("Connected %d segment(s) to master '%s'."
@@ -2377,24 +2720,48 @@ class GraphicSyncDialog(QtWidgets.QDialog):
         # must NOT re-walk per group: sequences_for_scope() keys off the timeline
         # playhead/focus, which the first group's overwrite disturbs -- re-walking
         # mid-rollout then returns nothing and every later group is skipped.
-        # The scan snapshot holds valid handles for the whole rollout; the uid
-        # guard + pre-trim in _connect_one keep each placement safe.
+        # The scan snapshot holds valid handles for the whole rollout; the
+        # pre-trim in _connect_one keeps each placement safe.
         original_seq = _ancestor(_current_segment(), "PySequence")   # before mutating
         inv = self._inv or graphic_inventory(self.scope.currentText())
-        uid_to_seg = {}
-        for d in inv:
-            uid_to_seg.setdefault(_seg_uid(d["seg"]), d["seg"])
+        # connection sets as they stand BEFORE the rollout (read-only), resolved
+        # by the same call the Q rows used: a group that joins an existing set
+        # copies FROM that set and never re-copies it; a group with segments
+        # gone from the scan, overlapping an earlier group, or touching an
+        # identity collision doesn't run.
+        _g, cluster_of, size_of, tainted, keys = link_context(inv)
+        key_to_idx = {}
+        for i, k in enumerate(keys):
+            key_to_idx.setdefault(k, i)
+        marked = {i for i, k in enumerate(keys) if k in self._sources}
+        res = resolve_queue(self._queue, key_to_idx, cluster_of, size_of, marked, tainted)
         affected, total, ran, total_done, msgs = {}, len(self._queue), 0, 0, []
-        for gi, g in enumerate(self._queue):
-            segs = [uid_to_seg[u] for u in g if u in uid_to_seg]
-            if len(segs) < 2:
-                msgs.append("Group %d skipped (%d/%d segments resolved)."
-                            % (gi + 1, len(segs), len(g)))
+        for gi, (g, r) in enumerate(zip(self._queue, res)):
+            plan = r["plan"]
+            if r["missing"] or len(r["idxs"]) < 2:
+                msgs.append("Group %d skipped (%d/%d segments still in the scan)."
+                            % (gi + 1, len(r["idxs"]), len(g)))
                 continue
-            chosen, serr = self._group_master(segs)   # honor a marked source
-            if serr:
-                msgs.append("Group %d skipped — %s" % (gi + 1, serr))
+            if not plan["work"]:
+                msgs.append("Group %d skipped — already connected." % (gi + 1))
                 continue
+            if plan["error"]:
+                msgs.append("Group %d skipped — %s" % (gi + 1, plan["error"]))
+                continue
+            if r["overlap"] is not None:
+                msgs.append("Group %d skipped — it shares a segment with group %d, which ran "
+                            "first. Run Auto Connection again to pick it up."
+                            % (gi + 1, r["overlap"] + 1))
+                continue
+            if plan["master"] is not None:          # joins a set, or re-lay-out
+                chosen = inv[plan["master"]]["seg"]
+                segs = [chosen] + [inv[i]["seg"] for i in plan["targets"]]
+            else:
+                segs = [inv[i]["seg"] for i in plan["targets"]]
+                chosen, serr = self._group_master(segs)   # honor a marked source
+                if serr:
+                    msgs.append("Group %d skipped — %s" % (gi + 1, serr))
+                    continue
             # collect affected sequences BEFORE connecting -- overwrite makes the
             # destination seg handles stale, so _ancestor would fail for them after.
             for s in segs:
@@ -2477,44 +2844,86 @@ class GraphicSyncDialog(QtWidgets.QDialog):
         """One-click: queue a connection group for every like-aspect, like-GFX
         set in the current scan. Builds the queue (does not run) so the user
         reviews the Q rows, then presses Execute Queue -- same trusted path as a
-        manual Queue, just done for all groups at once."""
+        manual Queue, just done for all groups at once. A proposal that wouldn't
+        run (a Set as Source mark that would split a set, or overlap with a
+        group already queued) is reported instead of queued."""
         inv = self._inv
         if not inv:
             self._say("Auto Connection: nothing scanned — check the Scope.")
             return
-        groups, already, unassigned = auto_connection_groups(inv)
-        # don't re-queue a group whose exact membership is already pending
+        ctx = link_context(inv)
+        _g, cluster_of, size_of, tainted, keys = ctx
+        groups, already, unassigned, split, unsafe = auto_connection_groups(inv, ctx)
+        key_to_idx = {}
+        for i, k in enumerate(keys):
+            key_to_idx.setdefault(k, i)
+        marked = {i for i, k in enumerate(keys) if k in self._sources}
         pending = {frozenset(g) for g in (self._queue or [])}
-        new_groups, dup = [], 0
+        trial = list(self._queue or [])
+        new_groups, dup, held = [], 0, []
         for g in groups:
-            uids = [_seg_uid(inv[i]["seg"]) for i in g]
+            uids = [keys[i] for i in g["idxs"]]
+            m = plan_connection_group(g["idxs"], cluster_of, size_of, marked, tainted)["master"]
+            if m is not None and m not in g["idxs"]:
+                uids = uids + [keys[m]]        # a Set as Source elsewhere in the set
             if frozenset(uids) in pending:
                 dup += 1
                 continue
+            d0 = inv[g["idxs"][0]]
+            tag = "%s  GFX%s" % (d0["aspect"], d0["num"])
+            r = resolve_queue(trial + [uids], key_to_idx, cluster_of, size_of,
+                              marked, tainted)[-1]
+            if r["plan"]["error"]:
+                held.append("%s: not queued — %s" % (tag, r["plan"]["error"]))
+                continue
+            if r["overlap"] is not None:
+                held.append("%s: not queued — part of it is already queued (Q%d). Run or "
+                            "clear the queue, then Auto Connection again." % (tag, r["overlap"] + 1))
+                continue
+            trial.append(uids)
             new_groups.append((g, uids))
         skip_bits = []
         if already:
             skip_bits.append("%d already connected" % already)
         if dup:
             skip_bits.append("%d already queued" % dup)
+        if split or unsafe or held:
+            skip_bits.append("%d need a look, see below" % (len(split) + len(unsafe) + len(held)))
         if unassigned:
             skip_bits.append("%d unassigned segment(s)" % unassigned)
         skip_note = ("  (skipped: %s)" % ", ".join(skip_bits)) if skip_bits else ""
         if not new_groups:
             self._say("Auto Connection: nothing new to queue%s." % skip_note)
-            return
-        # No modal confirm -- it only QUEUES (nothing runs yet), and the full
-        # group list could run off-screen. Queue straight away and log a concise,
-        # scrollable summary to the panel; the user reviews the Q rows then
-        # presses Execute Queue.
-        for _g, uids in new_groups:
-            self._queue.append(uids)
-        self._say("Auto Connection queued %d group(s)%s \u2014 review the Q rows, then Execute Queue:"
-                  % (len(new_groups), skip_note))
-        for g, _u in new_groups:
-            d0 = inv[g[0]]
-            gid = ("GFX" + d0["num"]) if d0["num"] else "\u2014"
-            self._say("   \u2022 %s  %s  (%d segment(s))" % (d0["aspect"], gid, len(g)))
+        else:
+            # No modal confirm -- it only QUEUES (nothing runs yet), and the full
+            # group list could run off-screen. Queue straight away and log a
+            # concise, scrollable summary to the panel; the user reviews the Q
+            # rows then presses Execute Queue.
+            for _g, uids in new_groups:
+                self._queue.append(uids)
+            self._say("Auto Connection queued %d group(s)%s — review the Q rows, then Execute Queue:"
+                      % (len(new_groups), skip_note))
+            for g, _u in new_groups:
+                d0 = inv[g["idxs"][0]]
+                gid = ("GFX" + d0["num"]) if d0["num"] else "—"
+                if g["anchor"] is not None:
+                    self._say("   • %s  %s  (%d new segment(s) join its connected set)"
+                              % (d0["aspect"], gid, len(g["idxs"]) - 1))
+                else:
+                    self._say("   • %s  %s  (%d segment(s))" % (d0["aspect"], gid, len(g["idxs"])))
+        # 2+ separate connected sets for one GFX in one aspect: which layout
+        # should win is the user's call, so these are reported, never queued
+        for aspect, num, n_sets, n_loose in split:
+            extra = (" + %d unconnected" % n_loose) if n_loose else ""
+            self._say("   ⚠ %s  GFX%s: %d separate connected sets%s — left alone. "
+                      "If they should share one layout, use Multi Segment Connection."
+                      % (aspect, num, n_sets, extra))
+        for aspect, num in unsafe:
+            self._say("   ⚠ %s  GFX%s: left alone — two graphics there share a sequence, "
+                      "name and In, so they can't be told apart. Give one a segment name in "
+                      "Flame, then rescan." % (aspect, num))
+        for m in held:
+            self._say("   ⚠ " + m)
         self._render_connections()
 
     # ---------------------------------------------------------------- Settings tab

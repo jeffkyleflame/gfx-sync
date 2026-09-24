@@ -8,7 +8,7 @@ Built with legal / disclaimer lines in mind for 16×9, 9×16, 1×1, 4×5, etc.
 while each aspect keeps its own framing. Works for any
 Flame-generated Type graphic.
 
-> Status: 1.0.0 — first public release, looking for testers. See
+> Status: 1.0.1 — see the [Changelog](#changelog). Looking for testers; read
 > [Known limitations](#known-limitations) before running it on production work.
 
 <img width="893" height="603" alt="gfx-sync-gui" src="https://github.com/user-attachments/assets/5fc36484-deb9-4185-a13a-e4f862dbf144" />
@@ -51,7 +51,9 @@ independent.
   start fresh); Renumber with Swap/Overwrite; Sync Text to a scope.
 - **Connections** — create / remove the native segment connections that share a
   graphic's layout across aspects. **Auto Connection** queues a connection group
-  for every like-aspect / like-GFX set automatically; review, then Execute Queue.
+  for every like-aspect / like-GFX set automatically — new segments **join** an
+  existing connected set (shown as `Q1 → A`) without re-copying it; review, then
+  Execute Queue. A group that won't run is marked ⚠ (hover to see why).
   **Set as Source** marks which segment's layout is the master. After a run, every
   affected sequence is parked at its first frame and you're returned to where you
   started.
@@ -120,6 +122,42 @@ open in Flame's **Timeline** tab (the tool switches you there on open).
   an aspect token and this never comes up. If you find mislabeling happening, 
   we may need to introduce a more manual way of assigning aspect ratios to sequences.
 
+
+## Changelog
+
+### 1.0.1
+- **Version shown in the window header**, so you can tell which build you're on.
+- **Auto Connection handles new segments joining an existing connected set.**
+  Previously a single new segment was silently dropped (the console said
+  "queued" but nothing appeared), and two or more new segments caused the
+  already-connected ones to be re-copied. Now the new segments join the set,
+  and only they are replaced.
+- **The queue shows exactly what will run.** The Q rows, Execute Queue and the
+  Multi Segment Connection confirm box all use the same plan, so "Yes" (run now)
+  and "Queue" (run later) always do the same thing. Groups that can't run are
+  marked ⚠ with the reason.
+- **Safer segment identity.** Flame doesn't give segments an ID, so the tool
+  identifies them by sequence, name, In, reel and reel group. A same-named copy
+  of a sequence in another reel is no longer mistaken for the live one. If two
+  graphics still can't be told apart (e.g. a legal and a super starting on the
+  same frame in one sequence, both unnamed), the scan warns you and the tool
+  won't connect them — give one a segment name to fix it.
+- **Split sets are reported, not guessed.** If one GFX in one aspect is already
+  split across two separate connected sets, Auto Connection tells you and leaves
+  it alone; which layout wins is your call.
+- **Set as Source** now works when the marked segment is anywhere in the set
+  being joined, and a Set as Source that would split a set is refused with an
+  explanation.
+- **Break Selected clears the queue**, since the connections it was planned on
+  just changed.
+- **Cleanup of temporary copies.** Connecting makes a temporary copy of the
+  master graphic in the reel; it's now deleted the way Flame requires from a
+  script, and any copy that can't be removed is reported in the console. If you
+  ever find stray copies of your graphics in a sequences reel after connecting,
+  they're safe to delete.
+
+### 1.0.0
+- First public release.
 
 ## Credits
 
